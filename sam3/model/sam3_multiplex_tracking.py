@@ -15,6 +15,7 @@ from sam3.model.data_misc import BatchedDatapoint
 from sam3.model.sam3_multiplex_base import MaskletConfirmationStatus, Sam3MultiplexBase
 from sam3.model.sam3_tracker_utils import fill_holes_in_mask_scores
 from sam3.model.sam3_video_inference import is_image_type
+from sam3.model.utils.misc import is_ray_initialized
 from sam3.perflib.compile import (
     clone_output_wrapper,
     compile_wrapper,
@@ -290,7 +291,7 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
         if reverse:
             end_frame_idx = start_frame_idx - max_frame_num_to_track
             end_frame_idx = max(end_frame_idx, 0)
-            processing_order = range(start_frame_idx - 1, end_frame_idx - 1, -1)
+            processing_order = range(start_frame_idx, end_frame_idx - 1, -1)
         else:
             end_frame_idx = start_frame_idx + max_frame_num_to_track
             end_frame_idx = min(end_frame_idx, num_frames - 1)
@@ -346,7 +347,9 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
         postprocess_yield_list = []
 
         for frame_idx in tqdm(
-            processing_order, desc="propagate_in_video", disable=self.rank > 0
+            processing_order,
+            desc="propagate_in_video",
+            disable=self.rank > 0 or is_ray_initialized(),
         ):
             out = self._run_single_frame_inference(
                 inference_state,
@@ -1236,23 +1239,33 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
                 if obj_id in filtered_obj_id_to_mask:
                     del filtered_obj_id_to_mask[obj_id]
 
+        # Move cached masks to CPU to avoid unbounded GPU memory growth
+        for obj_id in filtered_obj_id_to_mask:
+            if filtered_obj_id_to_mask[obj_id].is_cuda:
+                filtered_obj_id_to_mask[obj_id] = filtered_obj_id_to_mask[obj_id].cpu()
         inference_state["cached_frame_outputs"][frame_idx] = filtered_obj_id_to_mask
 
     def _build_sam2_output(
         self, inference_state, frame_idx, refined_obj_id_to_mask=None
     ):
         if not frame_idx in inference_state["cached_frame_outputs"]:
+            if refined_obj_id_to_mask is not None:
+                return dict(refined_obj_id_to_mask)
             return {}
 
         cached_outputs = inference_state["cached_frame_outputs"][frame_idx]
         obj_id_to_mask = cached_outputs.copy()
 
-        # Update with refined masks if provided
+        # Update with refined masks if provided, matching the device of cached masks
         if refined_obj_id_to_mask is not None:
             for obj_id, refined_mask in refined_obj_id_to_mask.items():
                 assert (
                     refined_mask is not None
                 ), f"Refined mask data must be provided for obj_id {obj_id}"
+                if refined_mask.is_cuda and obj_id_to_mask:
+                    # Cached masks are on CPU (see _cache_frame_outputs); match device
+                    existing = next(iter(obj_id_to_mask.values()))
+                    refined_mask = refined_mask.to(existing.device)
                 obj_id_to_mask[obj_id] = refined_mask
 
         return obj_id_to_mask
@@ -1930,7 +1943,9 @@ class Sam3MultiplexTrackingProd(Sam3MultiplexTracking):
         unconfirmed_status_delay = self.masklet_confirmation_consecutive_det_thresh - 1
 
         for frame_idx in tqdm(
-            processing_order, desc="propagate_in_video", disable=self.rank > 0
+            processing_order,
+            desc="propagate_in_video",
+            disable=self.rank > 0 or is_ray_initialized(),
         ):
             out = self._run_single_frame_inference(
                 inference_state,
@@ -2214,6 +2229,7 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
         self,
         resource_path,
         offload_video_to_cpu=False,
+        offload_state_to_cpu=False,
         async_loading_frames=False,
         use_torchcodec=False,
         use_cv2=False,
@@ -2227,6 +2243,7 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
             use_cv2=use_cv2,
             input_is_mp4=input_is_mp4,
         )
+        inference_state["offload_state_to_cpu"] = offload_state_to_cpu
         # initialize extra states
         inference_state["action_history"] = []  # for logging user actions
         if self.tracker.per_obj_inference:
@@ -2251,6 +2268,7 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
             video_height=inference_state["orig_height"],
             video_width=inference_state["orig_width"],
             num_frames=inference_state["num_frames"],
+            offload_state_to_cpu=inference_state.get("offload_state_to_cpu", False),
         )
 
     def cancel_propagation(self, inference_state):
@@ -2373,6 +2391,13 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
                         run_mem_encoder=True,
                     )
                 )
+                # Evict accumulated caches to prevent GPU OOM.
+                # The SAM2 tracker only needs the current frame's features
+                # (kept in feature_cache via cached_features).
+                feature_cache = inference_state["feature_cache"]
+                feature_cache.pop("grounding_cache", None)
+                feature_cache.pop("multigpu_buffer", None)
+                self.detector.clear_backbone_cache()
 
                 # broadcast refined object sam2 scores and masks to all GPUs
                 # handle multiple objects that can be located on different GPUs

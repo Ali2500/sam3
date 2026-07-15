@@ -3,9 +3,10 @@
 # pyre-unsafe
 
 import os
+from importlib.resources import files as _importlib_files
 from typing import Optional
 
-import pkg_resources
+import smart_open
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
@@ -538,7 +539,11 @@ def _create_sam3_transformer(
 
 def _load_checkpoint(model, checkpoint_path):
     """Load model checkpoint from file."""
-    with g_pathmgr.open(checkpoint_path, "rb") as f:
+    if checkpoint_path.startswith("s3://"):
+        read_fn = smart_open.open
+    else:
+        read_fn = g_pathmgr.open
+    with read_fn(checkpoint_path, "rb") as f:
         ckpt = torch.load(f, map_location="cpu", weights_only=True)
     if "model" in ckpt and isinstance(ckpt["model"], dict):
         ckpt = ckpt["model"]
@@ -596,8 +601,11 @@ def build_sam3_image_model(
         A SAM3 image model
     """
     if bpe_path is None:
-        bpe_path = pkg_resources.resource_filename(
-            "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
+        # bpe_path = pkg_resources.resource_filename(
+        #     "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
+        # )
+        bpe_path = str(
+            _importlib_files("sam3").joinpath("assets/bpe_simple_vocab_16e6.txt.gz")
         )
 
     # Create visual components
@@ -695,8 +703,11 @@ def build_sam3_video_model(
         Sam3VideoInferenceWithInstanceInteractivity: The instantiated dense tracking model
     """
     if bpe_path is None:
-        bpe_path = pkg_resources.resource_filename(
-            "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
+        # bpe_path = pkg_resources.resource_filename(
+        #     "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
+        # )
+        bpe_path = str(
+            _importlib_files("sam3").joinpath("assets/bpe_simple_vocab_16e6.txt.gz")
         )
 
     # Build Tracker module
@@ -797,7 +808,11 @@ def build_sam3_video_model(
     if load_from_HF and checkpoint_path is None:
         checkpoint_path = download_ckpt_from_hf(version="sam3")
     if checkpoint_path is not None:
-        with g_pathmgr.open(checkpoint_path, "rb") as f:
+        if checkpoint_path.startswith("s3://"):
+            read_fn = smart_open.open
+        else:
+            read_fn = g_pathmgr.open
+        with read_fn(checkpoint_path, "rb") as f:
             ckpt = torch.load(f, map_location="cpu", weights_only=True)
         if "model" in ckpt and isinstance(ckpt["model"], dict):
             ckpt = ckpt["model"]
@@ -1050,7 +1065,11 @@ def build_sam3_multiplex_video_model(
     if load_from_HF and checkpoint_path is None:
         checkpoint_path = download_ckpt_from_hf(version="sam3.1")
     if checkpoint_path is not None:
-        with g_pathmgr.open(checkpoint_path, "rb") as f:
+        if checkpoint_path.startswith("s3://"):
+            read_fn = smart_open.open
+        else:
+            read_fn = g_pathmgr.open
+        with read_fn(checkpoint_path, "rb") as f:
             ckpt = torch.load(f, map_location="cpu", weights_only=True)
         if "model" in ckpt and isinstance(ckpt["model"], dict):
             ckpt = ckpt["model"]
@@ -1079,6 +1098,7 @@ def build_sam3_multiplex_video_predictor(
     session_expiration_sec: int = 1200,
     default_output_prob_thresh: float = 0.5,
     async_loading_frames: bool = True,
+    offload_state_to_cpu: bool = False,
 ):
     """
     Build a fully-initialized Sam3MultiplexVideoPredictor.
@@ -1100,13 +1120,19 @@ def build_sam3_multiplex_video_predictor(
         session_expiration_sec: Session expiration timeout in seconds
         default_output_prob_thresh: Default probability threshold for output masks
         async_loading_frames: Whether to load frames asynchronously
+        offload_state_to_cpu: Whether to offload per-frame tracking state
+            (maskmem_features, pred_masks) to CPU. Prevents linear GPU memory
+            growth with video length at a small FPS cost (~10%).
 
     Returns:
         Sam3MultiplexVideoPredictor: The fully-initialized predictor
     """
     if bpe_path is None:
-        bpe_path = pkg_resources.resource_filename(
-            "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
+        # bpe_path = pkg_resources.resource_filename(
+        #     "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
+        # )
+        bpe_path = str(
+            _importlib_files("sam3").joinpath("assets/bpe_simple_vocab_16e6.txt.gz")
         )
 
     from sam3.model.sam3_multiplex_base import Sam3MultiplexPredictorWrapper
@@ -1135,6 +1161,7 @@ def build_sam3_multiplex_video_predictor(
         fill_hole_area=0,
         is_multiplex=True,
         is_multiplex_dynamic=True,
+        offload_state_to_cpu=offload_state_to_cpu,
     )
 
     # Build detector
@@ -1201,7 +1228,8 @@ def build_sam3_multiplex_video_predictor(
     if checkpoint_path is None:
         checkpoint_path = download_ckpt_from_hf(version="sam3.1")
     if checkpoint_path is not None:
-        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        with smart_open.open(checkpoint_path, "rb") as fh:
+            ckpt = torch.load(fh, map_location="cpu", weights_only=True)
         if "model" in ckpt and isinstance(ckpt["model"], dict):
             ckpt = ckpt["model"]
         # Remap checkpoint keys if needed (internal naming -> OSS naming)

@@ -46,6 +46,7 @@ class Sam3BasePredictor:
                 resource_path=request["resource_path"],
                 session_id=request.get("session_id", None),
                 offload_video_to_cpu=request.get("offload_video_to_cpu", False),
+                offload_state_to_cpu=request.get("offload_state_to_cpu", False),
             )
         elif request_type == "add_prompt":
             return self.add_prompt(
@@ -96,6 +97,7 @@ class Sam3BasePredictor:
                     "output_prob_thresh",
                     getattr(self, "default_output_prob_thresh", 0.5),
                 ),
+                reset_tracker_metadata=request.get("reset_tracker_metadata", True),
             )
         else:
             raise RuntimeError(f"invalid request type: {request_type}")
@@ -107,11 +109,13 @@ class Sam3BasePredictor:
         resource_path,
         session_id=None,
         offload_video_to_cpu=False,
+        offload_state_to_cpu=False,
     ):
         """Start a new inference session on a video directory or path."""
         init_kwargs = dict(
             resource_path=resource_path,
             offload_video_to_cpu=offload_video_to_cpu,
+            offload_state_to_cpu=offload_state_to_cpu,
         )
         if hasattr(self, "async_loading_frames"):
             init_kwargs["async_loading_frames"] = self.async_loading_frames
@@ -241,6 +245,7 @@ class Sam3BasePredictor:
         start_frame_idx=None,
         max_frame_num_to_track=None,
         output_prob_thresh=0.5,
+        reset_tracker_metadata=True,
         **kwargs,
     ):
         """Propagate the added prompts to get results on all video frames."""
@@ -268,15 +273,30 @@ class Sam3BasePredictor:
                 if k in sig.parameters:
                     propagate_kwargs[k] = v
 
-            # Forward propagation
-            if propagation_direction in ["both", "forward"]:
+            num_frames = inference_state["num_frames"]
+            effective_start = start_frame_idx if start_frame_idx is not None else 0
+
+            # Forward propagation (skip if already at last frame)
+            if (
+                propagation_direction in ["both", "forward"]
+                and effective_start < num_frames - 1
+            ):
                 for frame_idx, outputs in self.model.propagate_in_video(
                     **propagate_kwargs,
                     reverse=False,
                 ):
                     yield {"frame_index": frame_idx, "outputs": outputs}
-            # Backward propagation
-            if propagation_direction in ["both", "backward"]:
+            # Reset temporal tracking buffers between directions so the backward
+            # pass starts fresh. Skipped for point prompts (reset_tracker_metadata=False)
+            # which handle bidirectional propagation at the interface level instead.
+            if propagation_direction == "both" and reset_tracker_metadata:
+                inference_state["sam2_inference_states"].clear()
+                inference_state["feature_cache"].clear()
+                inference_state["cached_frame_outputs"] = {}
+                inference_state["tracker_metadata"].clear()
+
+            # Backward propagation (skip if already at first frame)
+            if propagation_direction in ["both", "backward"] and effective_start > 0:
                 for frame_idx, outputs in self.model.propagate_in_video(
                     **propagate_kwargs,
                     reverse=True,

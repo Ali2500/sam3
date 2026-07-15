@@ -18,7 +18,7 @@ from sam3.model.geometry_encoders import Prompt
 from sam3.model.io_utils import IMAGE_EXTS, load_resource_as_video_frames
 from sam3.model.sam3_tracker_utils import fill_holes_in_mask_scores
 from sam3.model.sam3_video_base import MaskletConfirmationStatus, Sam3VideoBase
-from sam3.model.utils.misc import copy_data_to_device
+from sam3.model.utils.misc import copy_data_to_device, is_ray_initialized
 from sam3.perflib.compile import compile_wrapper, shape_logging_wrapper
 from sam3.perflib.masks_ops import masks_to_boxes as perf_masks_to_boxes
 from torchvision.ops import masks_to_boxes
@@ -288,7 +288,9 @@ class Sam3VideoInference(Sam3VideoBase):
         unconfirmed_status_delay = self.masklet_confirmation_consecutive_det_thresh - 1
         unconfirmed_obj_ids_per_frame = {}  # frame_idx -> hidden_obj_ids
         for frame_idx in tqdm(
-            processing_order, desc="propagate_in_video", disable=self.rank > 0
+            processing_order,
+            desc="propagate_in_video",
+            disable=self.rank > 0 or is_ray_initialized(),
         ):
             out = self._run_single_frame_inference(inference_state, frame_idx, reverse)
 

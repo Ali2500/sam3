@@ -9,13 +9,14 @@ import torch
 def flash_attn_func_op(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
 ) -> torch.Tensor:
-    from flash_attn_interface import flash_attn_func as fa3
+    from flash_attn.flash_attn_interface import flash_attn_func as fa3
 
     return fa3(q, k, v)
 
 
 def flash_attn_func(q, k, v):
-    dtype = torch.float8_e4m3fn
+    dtype = torch.bfloat16
+    # dtype = torch.float8_e4m3fn
     return flash_attn_func_op(q.to(dtype), k.to(dtype), v.to(dtype)).to(q.dtype)
 
 

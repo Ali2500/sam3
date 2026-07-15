@@ -7,12 +7,14 @@ import os
 import queue
 import re
 import time
+import smart_open
 from threading import Condition, get_ident, Lock, Thread
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
+import tempfile
 from PIL import Image
 from sam3.logger import get_logger
 from tqdm import tqdm
@@ -34,21 +36,24 @@ def load_resource_as_video_frames(
     img_std=(0.5, 0.5, 0.5),
     async_loading_frames=False,
     video_loader_type="cv2",
+    max_frames_to_load=None,
 ):
     """
     Load video frames from either a video or an image (as a single-frame video).
     Alternatively, if input is a list of PIL images, convert its format
     """
     if isinstance(resource_path, list):
+        if max_frames_to_load is not None:
+            resource_path = resource_path[:max_frames_to_load]
         img_mean = torch.tensor(img_mean, dtype=torch.float16)[:, None, None]
         img_std = torch.tensor(img_std, dtype=torch.float16)[:, None, None]
         assert all(isinstance(img_pil, Image.Image) for img_pil in resource_path)
         assert len(resource_path) is not None
-        orig_height, orig_width = resource_path[0].size
-        orig_height, orig_width = (
-            orig_width,
-            orig_height,
-        )  # For some reason, this method returns these swapped
+        orig_width, orig_height = resource_path[0].size
+        # orig_height, orig_width = (
+        #     orig_width,
+        #     orig_height,
+        # )  # For some reason, this method returns these swapped
         images = []
         for img_pil in resource_path:
             img_np = np.array(img_pil.convert("RGB").resize((image_size, image_size)))
@@ -87,6 +92,7 @@ def load_resource_as_video_frames(
             img_std=img_std,
             async_loading_frames=async_loading_frames,
             video_loader_type=video_loader_type,
+            max_frames_to_load=max_frames_to_load,
         )
 
 
@@ -121,6 +127,7 @@ def load_video_frames(
     img_std=(0.5, 0.5, 0.5),
     async_loading_frames=False,
     video_loader_type="cv2",
+    max_frames_to_load=None,
 ):
     """
     Load the video frames from video_path. The frames are resized to image_size as in
@@ -147,6 +154,7 @@ def load_video_frames(
             img_mean=img_mean,
             img_std=img_std,
             async_loading_frames=async_loading_frames,
+            max_frames_to_load=max_frames_to_load,
         )
     elif os.path.splitext(video_path)[-1].lower() in VIDEO_EXTS:
         return load_video_frames_from_video_file(
@@ -157,6 +165,7 @@ def load_video_frames(
             img_std=img_std,
             async_loading_frames=async_loading_frames,
             video_loader_type=video_loader_type,
+            max_frames_to_load=max_frames_to_load,
         )
     else:
         raise NotImplementedError("Only video files and image folders are supported")
@@ -169,6 +178,7 @@ def load_video_frames_from_image_folder(
     img_mean,
     img_std,
     async_loading_frames,
+    max_frames_to_load=None,
 ):
     """
     Load the video frames from a directory of image files ("<frame_index>.<img_ext>" format)
@@ -193,6 +203,9 @@ def load_video_frames_from_image_folder(
     img_paths = [os.path.join(image_folder, frame_name) for frame_name in frame_names]
     img_mean = torch.tensor(img_mean, dtype=torch.float16)[:, None, None]
     img_std = torch.tensor(img_std, dtype=torch.float16)[:, None, None]
+
+    if max_frames_to_load is not None:
+        img_paths = img_paths[:max_frames_to_load]
 
     if async_loading_frames:
         lazy_images = AsyncImageFrameLoader(
@@ -227,6 +240,7 @@ def load_video_frames_from_video_file(
     gpu_acceleration=False,
     gpu_device=None,
     video_loader_type="cv2",
+    max_frames_to_load=None,
 ):
     """Load the video frames from a video file."""
     if video_loader_type == "cv2":
@@ -236,9 +250,14 @@ def load_video_frames_from_video_file(
             img_mean=img_mean,
             img_std=img_std,
             offload_video_to_cpu=offload_video_to_cpu,
+            max_frames_to_load=max_frames_to_load,
         )
     elif video_loader_type == "torchcodec":
         logger.info("Using torchcodec to load video file")
+        assert not video_path.startswith("s3://")
+        assert (
+            max_frames_to_load is None
+        ), f"This option is not supported with torchcodec"
         lazy_images = AsyncVideoFileLoaderWithTorchCodec(
             video_path=video_path,
             image_size=image_size,
@@ -265,6 +284,7 @@ def load_video_frames_from_video_file_using_cv2(
     img_mean: tuple = (0.5, 0.5, 0.5),
     img_std: tuple = (0.5, 0.5, 0.5),
     offload_video_to_cpu: bool = False,
+    max_frames_to_load=None,
 ) -> torch.Tensor:
     """
     Load video from path, convert to normalized tensor with specified preprocessing
@@ -280,32 +300,41 @@ def load_video_frames_from_video_file_using_cv2(
     """
     import cv2  # delay OpenCV import to avoid unnecessary dependency
 
-    # Initialize video capture
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video: {video_path}")
-
-    original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    num_frames = num_frames if num_frames > 0 else None
-
+    with smart_open.open(video_path, "rb") as fh:
+        video_bytes = fh.read()
+    ext = video_path.split(".")[-1]
     frames = []
-    pbar = tqdm(desc=f"frame loading (OpenCV) [rank={RANK}]", total=num_frames)
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
 
-        # Convert BGR to RGB and resize
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_resized = cv2.resize(
-            frame_rgb, (image_size, image_size), interpolation=cv2.INTER_CUBIC
-        )
-        frames.append(frame_resized)
-        pbar.update(1)
-    cap.release()
-    pbar.close()
+    with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=True) as tmp_file:
+        tmp_file.write(video_bytes)
+        tmp_file.flush()
+        # Initialize video capture
+        cap = cv2.VideoCapture(tmp_file.name)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
+
+        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        num_frames = num_frames if num_frames > 0 else None
+
+        pbar = tqdm(desc=f"frame loading (OpenCV) [rank={RANK}]", total=num_frames)
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            # Convert BGR to RGB and resize
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame_resized = cv2.resize(
+                frame_rgb, (image_size, image_size), interpolation=cv2.INTER_CUBIC
+            )
+            frames.append(frame_resized)
+            pbar.update(1)
+            if max_frames_to_load is not None and len(frames) == max_frames_to_load:
+                break
+        cap.release()
+        pbar.close()
 
     if len(frames) == 0:
         raise RuntimeError(

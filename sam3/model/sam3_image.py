@@ -31,6 +31,19 @@ def _update_out(out, out_name, out_value, auxiliary=True, update_aux=True):
             aux_output[out_name] = aux_value
 
 
+def struct_to(x, *args, **kwargs):
+    if isinstance(x, torch.Tensor):
+        return x.to(*args, **kwargs)
+    elif isinstance(x, (tuple, list)):
+        return [struct_to(elem, *args, **kwargs) for elem in x]
+    elif isinstance(x, dict):
+        return {k: struct_to(v, *args, **kwargs) for k, v in x.items()}
+    elif x is None:
+        return None
+    else:
+        return x.to(*args, **kwargs)
+
+
 class Sam3Image(torch.nn.Module):
     TEXT_ID_FOR_TEXT = 0
     TEXT_ID_FOR_VISUAL = 1
@@ -101,6 +114,41 @@ class Sam3Image(torch.nn.Module):
         self.multimask_output = multimask_output
 
         self.inst_interactive_predictor = inst_interactive_predictor
+        # self.cache_backbone_feats = False
+        self._backbone_image_cache = None
+
+    def enable_backbone_cache(self):
+        """Enable GPU-resident backbone feature cache."""
+        self._backbone_image_cache = {}
+
+    def disable_backbone_cache(self):
+        """Enable GPU-resident backbone feature cache."""
+        self._backbone_image_cache = None
+
+    def clear_backbone_cache(self):
+        """Clear and disable backbone feature cache, freeing GPU memory."""
+        if self._backbone_image_cache is not None:
+            self._backbone_image_cache.clear()  #  = None
+
+    def move_cache_entries_to_cpu(self):
+        if self._backbone_image_cache is not None:
+            self._backbone_image_cache = struct_to(
+                self._backbone_image_cache, device="cpu"
+            )
+
+    def evict_from_backbone_cache(self, frame_indices):
+        """Remove specific frames from the backbone cache.
+
+        Args:
+            frame_indices: a single frame index or an iterable of frame indices.
+        """
+        if self._backbone_image_cache is None:
+            return
+        if isinstance(frame_indices, int):
+            self._backbone_image_cache.pop(frame_indices, None)
+        else:
+            for idx in frame_indices:
+                self._backbone_image_cache.pop(idx, None)
 
     @property
     def device(self):
@@ -156,9 +204,22 @@ class Sam3Image(torch.nn.Module):
             (len(img_batch),), -1, dtype=torch.long, device=self.device
         )
         id_mapping[unique_ids] = torch.arange(len(unique_ids), device=self.device)
+
+        # Check persistent backbone cache (set externally to reuse across text prompts)
+        _cache = getattr(self, "_backbone_image_cache", None)
+        _cache_key = (
+            unique_ids.item() if unique_ids.numel() == 1 else tuple(unique_ids.tolist())
+        )
+        if _cache is not None and _cache_key in _cache:
+            forward_image_out = struct_to(_cache[_cache_key], device=self.device)
+        else:
+            forward_image_out = self.backbone.forward_image(image)
+            if _cache is not None:
+                _cache[_cache_key] = forward_image_out
+
         backbone_out = {
             **backbone_out,
-            **self.backbone.forward_image(image),
+            **forward_image_out,
             "id_mapping": id_mapping,
         }
         assert "backbone_fpn" in backbone_out

@@ -8,6 +8,21 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 import torch
 
+try:
+    import ray
+except ImportError:
+    ray = None
+
+
+def is_ray_initialized() -> bool:
+    """Return whether a Ray runtime is active.
+
+    Used to suppress duplicate tqdm progress bars: under Ray, each worker is a
+    separate process (so a per-process check like DDP rank does not dedupe across
+    them). Returns False when Ray is not installed, keeping it an optional dep.
+    """
+    return ray is not None and ray.is_initialized()
+
 
 def _is_named_tuple(x) -> bool:
     return isinstance(x, tuple) and hasattr(x, "_asdict") and hasattr(x, "_fields")

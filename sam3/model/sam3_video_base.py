@@ -1753,6 +1753,7 @@ class Sam3VideoBase(nn.Module):
             video_height=orig_vid_height,
             video_width=orig_vid_width,
             num_frames=num_frames,
+            offload_state_to_cpu=getattr(self.tracker, "offload_state_to_cpu", False),
         )
         new_tracker_state["backbone_out"] = (
             prev_tracker_state.get("backbone_out", None)

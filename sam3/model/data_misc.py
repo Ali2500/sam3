@@ -31,6 +31,9 @@ class NestedTensor:
         new_mask = None if self.mask is None else self.mask.clone()
         return NestedTensor(new_tensors, new_mask)
 
+    def cpu(self):
+        return self.to(device="cpu")
+
     def __getitem__(self, idx):
         return self.tensors[idx]
 

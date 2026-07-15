@@ -2637,6 +2637,9 @@ class Sam3MultiplexBase(Sam3VideoBase):
                     video_height=orig_vid_height,
                     video_width=orig_vid_width,
                     num_frames=num_frames,
+                    offload_state_to_cpu=getattr(
+                        self.tracker, "offload_state_to_cpu", False
+                    ),
                 )
                 new_sam2_state["backbone_out"] = (
                     prev_sam2_state.get("backbone_out", None)
@@ -2657,6 +2660,9 @@ class Sam3MultiplexBase(Sam3VideoBase):
                         video_height=orig_vid_height,
                         video_width=orig_vid_width,
                         num_frames=num_frames,
+                        offload_state_to_cpu=getattr(
+                            self.tracker, "offload_state_to_cpu", False
+                        ),
                     )
                     new_sam2_state["backbone_out"] = None
                     tracker_states_local = [new_sam2_state]
@@ -2668,6 +2674,9 @@ class Sam3MultiplexBase(Sam3VideoBase):
                     video_height=orig_vid_height,
                     video_width=orig_vid_width,
                     num_frames=num_frames,
+                    offload_state_to_cpu=getattr(
+                        self.tracker, "offload_state_to_cpu", False
+                    ),
                 )
                 new_sam2_state["backbone_out"] = (
                     prev_sam2_state.get("backbone_out", None)
@@ -2842,6 +2851,7 @@ class Sam3MultiplexPredictorWrapper(Sam3MultiplexTrackerPredictor):
         fill_hole_area=0,
         is_multiplex=True,
         is_multiplex_dynamic=True,
+        offload_state_to_cpu=False,
     ):
         # Skip Sam3MultiplexTrackerPredictor.__init__ (requires Hydra) — call nn.Module.__init__ directly
         nn.Module.__init__(self)
@@ -2850,6 +2860,7 @@ class Sam3MultiplexPredictorWrapper(Sam3MultiplexTrackerPredictor):
         self.fill_hole_area = fill_hole_area
         self.is_multiplex = is_multiplex
         self.is_multiplex_dynamic = is_multiplex_dynamic
+        self.offload_state_to_cpu = offload_state_to_cpu
 
         # use bfloat16 inference for Flash Attention kernel
         self.bf16_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)

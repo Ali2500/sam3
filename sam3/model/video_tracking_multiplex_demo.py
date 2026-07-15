@@ -2698,6 +2698,11 @@ class VideoTrackingMultiplexDemo(VideoTrackingDynamicMultiplex):
                     raise RuntimeError(
                         f"No existing output found for frame {frame_idx} in either storage"
                     )
+                # Move offloaded CPU tensors back to GPU for in-place modification
+                device = inference_state["device"]
+                for k, v in existing_out.items():
+                    if isinstance(v, torch.Tensor) and v.device != device:
+                        existing_out[k] = v.to(device, non_blocking=True)
 
                 # Prepare interactive features
                 interactive_pix_feat = self._get_interactive_pix_mem(
