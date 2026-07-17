@@ -1,11 +1,10 @@
-# FAR Fork — Changes vs. Upstream SAM 3.1
+# Fork — Changes vs. Upstream SAM 3.1
 
 This is a fork of [`facebookresearch/sam3`](https://github.com/facebookresearch/sam3),
 branched from the **SAM 3.1 Release** (`20dba30`). It carries a small set of
-changes needed to run SAM 3.1 video tracking at scale inside FAR's data-annotation
-pipeline — primarily **long-video inference** (which the stock model cannot do
-because GPU memory grows linearly with video length), plus a few environment and
-correctness fixes.
+changes needed to run SAM 3.1 video tracking at scale — primarily
+**long-video inference** (which the stock model cannot do because GPU memory grows
+linearly with video length), plus a few environment and correctness fixes.
 
 All changes live on the `sam3.1` branch on top of the upstream release commit, so
 the delta is exactly one commit:
@@ -18,11 +17,11 @@ git diff 20dba30 sam3.1        # full diff of every change described below
 
 The upstream video predictor keeps every frame's tracking state
 (`maskmem_features`, `pred_masks`, backbone features) resident on the GPU for the
-whole clip. On the multi-minute web videos we annotate, this OOMs long before the
-clip finishes. The bulk of the changes below implement **opt-in CPU offloading**
-of that state, plus the cache eviction and device-management needed to make it
-correct. The remainder adapt the model to our runtime: S3 I/O, an A100 (non-Hopper)
-attention path, and Ray-aware logging.
+whole clip. On multi-minute videos this OOMs long before the clip finishes. The
+bulk of the changes below implement **opt-in CPU offloading** of that state, plus
+the cache eviction and device-management needed to make it correct. The remainder
+adapt the model to the target runtime: S3 I/O, an A100 (non-Hopper) attention path,
+and Ray-aware logging.
 
 ---
 
@@ -45,9 +44,9 @@ changes let per-frame tracking state be offloaded to CPU (opt-in via
 
 ## 2. Reverse-propagation / bidirectional-tracking bug fixes
 
-**Cause:** Bugs surfaced while running bidirectional propagation on our clips
-(off-by-one on the reverse pass, and stale tracking buffers leaking between the
-forward and backward passes).
+**Cause:** Bugs surfaced while running bidirectional propagation (off-by-one on
+the reverse pass, and stale tracking buffers leaking between the forward and
+backward passes).
 
 | File | Change |
 |------|--------|
@@ -56,8 +55,8 @@ forward and backward passes).
 
 ## 3. S3 / remote I/O support
 
-**Cause:** In our pipeline, videos, checkpoints, and the BPE vocab live on S3, not
-the local filesystem. `smart_open` handles `s3://` URIs transparently.
+**Cause:** Videos, checkpoints, and the BPE vocab may live on S3 rather than the
+local filesystem. `smart_open` handles `s3://` URIs transparently.
 
 | File | Change |
 |------|--------|
@@ -76,12 +75,12 @@ source videos.
 
 ## 5. Environment adaptations
 
-**Cause:** Our runtime differs from the upstream reference environment (A100 rather
-than Hopper GPUs, Ray-based distribution, and a newer packaging API).
+**Cause:** The target runtime differs from the upstream reference environment (A100
+rather than Hopper GPUs, Ray-based distribution, and a newer packaging API).
 
 | File | Change | Reason |
 |------|--------|--------|
-| `sam3/perflib/fa3.py` | Attention dtype `float8_e4m3fn` → `bfloat16` (float8 kept commented), and import path `flash_attn_interface` → `flash_attn.flash_attn_interface`. | `float8_e4m3fn` FA3 requires Hopper (H100); we run on A100 and older GPUs, which needs bfloat16 and the `flash_attn`-packaged interface. |
+| `sam3/perflib/fa3.py` | Attention dtype `float8_e4m3fn` → `bfloat16` (float8 kept commented), and import path `flash_attn_interface` → `flash_attn.flash_attn_interface`. | `float8_e4m3fn` FA3 requires Hopper (H100); A100 and older GPUs need bfloat16 and the `flash_attn`-packaged interface. |
 | `sam3/model/utils/misc.py` | Added `is_ray_initialized()` with a guarded `import ray` (returns `False` if Ray is not installed). | Suppress duplicate `tqdm` progress bars across Ray workers. Ray stays an optional dependency, so this remains upstream-friendly. |
 | `sam3/model/sam3_video_inference.py`, `sam3/model/sam3_multiplex_tracking.py` | Progress-bar `disable=self.rank > 0` → `disable=self.rank > 0 or is_ray_initialized()`. | The DDP-rank check does not dedupe across Ray worker *processes*; each is its own process. Combining both covers DDP and Ray. |
 | `sam3/model_builder.py` | `pkg_resources.resource_filename(...)` → `importlib.resources.files(...)` for the BPE asset path. | `pkg_resources` is deprecated; `importlib.resources` is the supported API. (Generally upstreamable.) |
