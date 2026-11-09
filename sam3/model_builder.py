@@ -899,6 +899,7 @@ def _create_multiplex_transformer(use_fa3=False, use_rope_real=False):
     )
 
     encoder_layer = DecoupledTransformerDecoderLayerv2(
+        cross_attention_first=True,
         activation="gelu",
         d_model=256,
         num_heads=8,
